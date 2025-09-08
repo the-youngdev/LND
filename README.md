@@ -17,7 +17,7 @@ This project contains the complete source code for a high-performance, 8-sensor 
 ## ⚙️ Hardware Requirements
 
 * **Microcontroller**: Arduino Uno, Nano, or any compatible board.
-* **Sensor Array**: 8-Channel Analog IR Sensor Array (e.g., QTR-8A).
+* **Sensor Array**: 8-Channel Analog IR Sensor Array (e.g., QTR-8A,RLS08).
 * **Motor Driver**: Dual H-Bridge Motor Driver (e.g., L298N, TB6612FNG).
 * **Motors**: 2 x DC Geared Motors.
 * **Chassis**: A robot chassis to mount all components.
@@ -31,7 +31,7 @@ Connect the components to your Arduino according to the pins defined in the code
 | Component             | Pin Name              | Arduino Pin |
 | --------------------- | --------------------- | ----------- |
 | **Sensors** | S0 - S7               | A0 - A7     |
-| **LED Indicator** | LED                   | 3           |
+| **LED Indicator** | LED and BUZZER                   | 3           |
 | **Motor Driver** | STBY (Standby)        | 6           |
 |                       | LEFT\_MOTOR\_PIN\_1 (AIN1)  | 8           |
 |                       | LEFT\_MOTOR\_PIN\_2 (AIN2)  | 7           |
