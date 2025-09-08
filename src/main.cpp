@@ -1,12 +1,16 @@
 #include <Arduino.h>
 #include <stdint.h>
+#include <EEPROM.h>
 #include "motor_control.h"
 #include "Config.h"
 
+#define CALIBRATION_BUTTON_PIN 2 
+#define EEPROM_MAGIC_VALUE   'C' 
 #define WHITE_LINE_BLACK_TRACK 1
 #define BLACK_LINE_WHITE_TRACK 0
 #define SENSOR_COUNT 8
 #define POSITIONAL_WEIGHT_W 100 
+
 
 #define CMD_STANDBY    's'
 #define CMD_RUN        'r'
@@ -143,10 +147,41 @@ void calibrateSensorsAndTrackType(unsigned long timeoutMs = 3000) {
 // Convert sensor bitmap to normalized error (integer). fallbackError used if none detected.
 // In getCalculatedError()
 // In getCalculatedError()
+void saveCalibration() {
+  Serial.println("Saving calibration data to EEPROM...");
+  // Write a 'magic value' to the first byte of EEPROM to know that data is valid
+  EEPROM.write(0, EEPROM_MAGIC_VALUE);
+  
+  // Use EEPROM.put() to store the TrackType and the thresholds array
+  EEPROM.put(1, TrackType);
+  EEPROM.put(1 + sizeof(TrackType), thresholds);
+  
+  Serial.println("Save complete.");
+}
+
+bool loadCalibration() {
+  Serial.println("Attempting to load calibration from EEPROM...");
+  // Check if our 'magic value' exists. If not, the EEPROM is empty or has old data.
+  if (EEPROM.read(0) == EEPROM_MAGIC_VALUE) {
+    // If it exists, load the data using EEPROM.get()
+    EEPROM.get(1, TrackType);
+    EEPROM.get(1 + sizeof(TrackType), thresholds);
+    
+    Serial.println("Load successful. Using stored values.");
+    calibrated = true; // Make sure the global flag is set
+    return true; // Return true to indicate success
+  }
+  
+  Serial.println("No valid calibration data found.");
+  return false; // Return false to indicate failure
+}
+
+// In main.cpp
+
 int getCalculatedError(int fallbackError)
 {
-    uint8_t sensorReading = getSensorReadingsRaw();
 
+    uint8_t sensorReading = getSensorReadingsRaw();
     if (TrackType == WHITE_LINE_BLACK_TRACK) {
       sensorReading = ~sensorReading;
     }
@@ -165,18 +200,14 @@ int getCalculatedError(int fallbackError)
     if (denominatorSum == 0) {
       return fallbackError;
     }
+    
+    long position_fixed = (long)numeratorSum * 100 / denominatorSum; 
+    long center_fixed = ( (SENSOR_COUNT - 1) * 2 * 100 ) / 2;       
+    long e_fixed = position_fixed - center_fixed;                   
 
-    // *** OPTIMIZATION: Using fixed-point integer math to avoid slow floats ***
-    // We scale everything up by 100 to preserve precision during division.
-    long position_fixed = (long)numeratorSum * 100 / denominatorSum; // position is now 0..1400
-    long center_fixed = ( (SENSOR_COUNT - 1) * 2 * 100 ) / 2;       // center is now 700
-    long e_fixed = position_fixed - center_fixed;                   // error is now -700..+700
-
-    // Scale the fixed-point error back down to the desired range
     int scaledError = (int)((e_fixed * POSITIONAL_WEIGHT_W) / 700); 
     return scaledError;
 }
-
 
 int isOutOfLine(uint8_t sensorReadings)
 {
@@ -188,52 +219,70 @@ int isOutOfLine(uint8_t sensorReadings)
 void indicateOn() { digitalWrite(LED, HIGH); }
 void indicateOff() { digitalWrite(LED, LOW); }
 
+
 void readSensors()
 {
     uint8_t sensorData = getSensorReadingsRaw();
-    // compute error with fallback = previous error to maintain direction
-    int fallback = (previousError == 0) ? 1 : (previousError > 0 ? 1 : -1);
-    error = getCalculatedError(fallback);
+    
+    // Invert sensor data if we are on a white line track
+    if (TrackType == WHITE_LINE_BLACK_TRACK) {
+        sensorData = ~sensorData;
+    }
+    
+    // --- FEATURE 1: INTERSECTION HANDLING & DYNAMIC COLOR SWAP ---
+    if (ALL_SENSORS_DETECT_LINE_COLOR(sensorData)) {
+        // When we hit an intersection, we can determine the current track color
+        int averageRawReading = 0;
+        for(int i=0; i<SENSOR_COUNT; ++i) averageRawReading += rawAnalog[i];
+        averageRawReading /= SENSOR_COUNT;
 
-    int s1 = (sensorData & (1 << 7)) >> 7;
-    int s8 = (sensorData & (1 << 0)) >> 0;
-    if (s1 != s8) error_dir = s1 - s8;
+        // If average reading is low, it's a bright surface (white line)
+        if (averageRawReading < 400 && TrackType != WHITE_LINE_BLACK_TRACK) {
+            TrackType = WHITE_LINE_BLACK_TRACK;
+            Serial.println("RUNTIME SWAP to WHITE_LINE_BLACK_TRACK");
+        } 
+        // If average reading is high, it's a dark surface (black line)
+        else if (averageRawReading > 600 && TrackType != BLACK_LINE_WHITE_TRACK) {
+            TrackType = BLACK_LINE_WHITE_TRACK;
+            Serial.println("RUNTIME SWAP to BLACK_LINE_WHITE_TRACK");
+        }
 
-    if (sensorData == 0xFF) {
-      digitalWrite(LED, HIGH);
-    } else {
-      digitalWrite(LED, LOW);
+        // Action: Move straight to cross the intersection
+        moveStraight(baseMotorSpeed, baseMotorSpeed);
+        delay(INTERSECTION_STRAIGHT_MS);
+        previousError = 0; // Assume we are centered after crossing
+        return; // Skip normal PID calculation for this cycle
     }
 
-    if (sensorData == 0x00) {
-      // completely off line
-      if (error_dir < 0) error = OUT_OF_LINE_ERROR_VALUE;
-      else if (error_dir > 0) error = -OUT_OF_LINE_ERROR_VALUE;
-    } 
-    else if (sensorData == 0xFF) {
-      // checkpoint logic: move straight then check again
-      moveStraight(baseMotorSpeed, baseMotorSpeed);
-      delay(STOP_CHECK_DELAY);
-      uint8_t sensorDataAgain = getSensorReadingsRaw();
-      if (sensorDataAgain == 0xFF) {
-        shortBrake(100);
-        stop();
-        delay(3000);
-      }
-    } 
-    else if (IS_ACUTE_LEFT(sensorData)) {
-        error = OUT_OF_LINE_ERROR_VALUE;
-        error_dir = -1;
-    }
-    else if (IS_ACUTE_RIGHT(sensorData)) {
-        error = -OUT_OF_LINE_ERROR_VALUE;
-        error_dir = 1;
+    // --- FEATURE 2: GAP & OFF-LINE HANDLING ---
+    else if (ALL_SENSORS_OUT_OF_LINE_COLOR(sensorData)) {
+        // Action: Move straight first to try and cross a potential gap
+        moveStraight(baseMotorSpeed, baseMotorSpeed);
+        delay(GAP_STRAIGHT_MS);
+        
+        // After moving straight, read again to see if we found the line
+        uint8_t sensorDataAgain = getSensorReadingsRaw();
+        if (TrackType == WHITE_LINE_BLACK_TRACK) sensorDataAgain = ~sensorDataAgain;
+
+        if (ALL_SENSORS_OUT_OF_LINE_COLOR(sensorDataAgain)) {
+            // If we are STILL off the line, it wasn't a gap.
+            // Set a large error to trigger the search logic in controlMotors()
+            error = (error_dir < 0) ? OUT_OF_LINE_ERROR_VALUE : -OUT_OF_LINE_ERROR_VALUE;
+        } else {
+            // We found the line again, it was just a gap!
+            // Continue with normal PID calculation.
+        }
     }
 
-    if (MID_6_SENSORS_DETECT_LINE_COLOR(sensorData))
-        indicateOn();
-    else
-        indicateOff();
+    // --- NORMAL LINE FOLLOWING ---
+    // Update error_dir based on the outermost sensors for search direction
+    int s1 = (sensorData & (1 << 7)); // Leftmost sensor
+    int s8 = (sensorData & (1 << 0)); // Rightmost sensor
+    if (s1 && !s8) error_dir = -1; // Line is to the left
+    if (!s1 && s8) error_dir = 1;  // Line is to the right
+
+    // Calculate the error for PID control
+    error = getCalculatedError(previousError); 
 }
 
 // In calculatePID()
@@ -282,30 +331,25 @@ void searchForLine() {
 }
 
 
-// Refactored controlMotors function
+
+
 void controlMotors()
 {
   #if DEBUG_ENABLED
   Serial.print("Error: "); Serial.println(error);
   #endif
 
+  // If error is max value, it means we are lost (not in a gap) -> Search for line
   if (abs(error) == OUT_OF_LINE_ERROR_VALUE)
   {
-    searchForLine();
+    searchForLine(); // This function already exists and works well for this
   }
-  else
+  else // Otherwise, use PID to steer
   {
-    // Apply offsets as additive calibration, not as subtraction that counteracts PID
-    int leftMotorSpeed = baseMotorSpeed + PID_value + leftMotorOffset;
-    int rightMotorSpeed = baseMotorSpeed - PID_value + rightMotorOffset;
-
-    leftMotorSpeed = constrain(leftMotorSpeed, -255, 255);
-    rightMotorSpeed = constrain(rightMotorSpeed, -255, 255);
+    int leftMotorSpeed = baseMotorSpeed + PID_value;
+    int rightMotorSpeed = baseMotorSpeed - PID_value;
 
     moveStraight(leftMotorSpeed, rightMotorSpeed);
-
-    // small non-blocking delay for loop pacing
-    if (D != 0) delay(loopDelay);
   }
 }
 
@@ -359,13 +403,40 @@ void setup() {
   pinMode(S6, INPUT);
   pinMode(S7, INPUT);
   pinMode(LED, OUTPUT);
+  
+  // Set up the new calibration button with an internal pull-up resistor
+  pinMode(CALIBRATION_BUTTON_PIN, INPUT_PULLUP);
 
   motorInit();
   pinMode(STBY, OUTPUT);
   digitalWrite(STBY, HIGH);
 
-  // calibrate sensors and detect track type on startup
-  calibrateSensorsAndTrackType();
+  // Check if the manual calibration button is being held down on startup
+  // A LOW signal means the button is pressed because we are using INPUT_PULLUP
+  if (digitalRead(CALIBRATION_BUTTON_PIN) == LOW) {
+    Serial.println("Manual calibration triggered!");
+    indicateOn(); // Turn on LED to show calibration is starting
+    calibrateSensorsAndTrackType();
+    indicateOff();
+  } else {
+    // If button is not pressed, try to load from EEPROM
+    if (!loadCalibration()) {
+      // If loading fails, then run the calibration routine
+      indicateOn();
+      calibrateSensorsAndTrackType();
+      indicateOff();
+    }
+  }
+
+  // For debugging, print the final values being used
+  Serial.println("--- Robot is ready with these values: ---");
+  Serial.print("TrackType: ");
+  Serial.println(TrackType == BLACK_LINE_WHITE_TRACK ? "BLACK_LINE_WHITE_TRACK" : "WHITE_LINE_BLACK_TRACK");
+  Serial.print("Thresholds: ");
+  for (int i = 0; i < SENSOR_COUNT; ++i) {
+    Serial.print(thresholds[i]); Serial.print(i == SENSOR_COUNT-1 ? "\n" : ", ");
+  }
+  Serial.println("-----------------------------------------");
 }
 
 void loop() {

@@ -20,6 +20,8 @@
 
 #define OUT_OF_LINE_ERROR_VALUE 20
 #define STOP_CHECK_DELAY 300
+#define INTERSECTION_STRAIGHT_MS 50 
+#define GAP_STRAIGHT_MS 100  
 
 // debug
 #define DEBUG_ENABLED 1             // set to 1 to enable sparse debug prints
