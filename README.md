@@ -31,7 +31,7 @@ Connect the components to your Arduino according to the pins defined in the code
 | Component             | Pin Name              | Arduino Pin |
 | --------------------- | --------------------- | ----------- |
 | **Sensors** | S0 - S7               | A0 - A7     |
-| **LED Indicator** | LED                   | 3           |
+| **LED Indicator** | LED and BUZZER                   | 3           |
 | **Motor Driver** | STBY (Standby)        | 6           |
 |                       | LEFT\_MOTOR\_PIN\_1 (AIN1)  | 8           |
 |                       | LEFT\_MOTOR\_PIN\_2 (AIN2)  | 7           |
