@@ -41,6 +41,7 @@ Connect the components to your Arduino according to the pins defined in the code
 |                       | RIGHT\_MOTOR\_PWM\_PIN (PWMB) | 11 (PWM)    |
 | **Bluetooth Module** | TX                    | RX (Pin 0)  |
 |                       | RX                    | TX (Pin 1)  |
+| **Calibration Button** | for Threshold of Sensors                    | 2  |
 
 **Note**: The Bluetooth module uses the Arduino's hardware serial pins (0, 1). You must disconnect the module while uploading code via USB.
 
