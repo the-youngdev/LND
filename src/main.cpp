@@ -220,68 +220,62 @@ void indicateOn() { digitalWrite(LED, HIGH); }
 void indicateOff() { digitalWrite(LED, LOW); }
 
 
+// In main.cpp
+
 void readSensors()
 {
     uint8_t sensorData = getSensorReadingsRaw();
     
-    // Invert sensor data if we are on a white line track
     if (TrackType == WHITE_LINE_BLACK_TRACK) {
         sensorData = ~sensorData;
     }
     
-    // --- FEATURE 1: INTERSECTION HANDLING & DYNAMIC COLOR SWAP ---
     if (ALL_SENSORS_DETECT_LINE_COLOR(sensorData)) {
+        #if DEBUG_ENABLED
+        // --- TEMPORARY DEBUG MESSAGE ---
+        Serial.println("DEBUG: In Intersection Logic");
+        #endif
         // When we hit an intersection, we can determine the current track color
         int averageRawReading = 0;
         for(int i=0; i<SENSOR_COUNT; ++i) averageRawReading += rawAnalog[i];
         averageRawReading /= SENSOR_COUNT;
 
-        // If average reading is low, it's a bright surface (white line)
         if (averageRawReading < 400 && TrackType != WHITE_LINE_BLACK_TRACK) {
             TrackType = WHITE_LINE_BLACK_TRACK;
             Serial.println("RUNTIME SWAP to WHITE_LINE_BLACK_TRACK");
         } 
-        // If average reading is high, it's a dark surface (black line)
         else if (averageRawReading > 600 && TrackType != BLACK_LINE_WHITE_TRACK) {
             TrackType = BLACK_LINE_WHITE_TRACK;
             Serial.println("RUNTIME SWAP to BLACK_LINE_WHITE_TRACK");
         }
 
-        // Action: Move straight to cross the intersection
         moveStraight(baseMotorSpeed, baseMotorSpeed);
         delay(INTERSECTION_STRAIGHT_MS);
-        previousError = 0; // Assume we are centered after crossing
-        return; // Skip normal PID calculation for this cycle
+        previousError = 0;
+        return;
     }
-
-    // --- FEATURE 2: GAP & OFF-LINE HANDLING ---
     else if (ALL_SENSORS_OUT_OF_LINE_COLOR(sensorData)) {
-        // Action: Move straight first to try and cross a potential gap
+        #if DEBUG_ENABLED 
+        // --- TEMPORARY DEBUG MESSAGE ---
+        Serial.println("DEBUG: In Gap/Off-line Logic");
+        #endif 
+
         moveStraight(baseMotorSpeed, baseMotorSpeed);
         delay(GAP_STRAIGHT_MS);
         
-        // After moving straight, read again to see if we found the line
         uint8_t sensorDataAgain = getSensorReadingsRaw();
         if (TrackType == WHITE_LINE_BLACK_TRACK) sensorDataAgain = ~sensorDataAgain;
 
         if (ALL_SENSORS_OUT_OF_LINE_COLOR(sensorDataAgain)) {
-            // If we are STILL off the line, it wasn't a gap.
-            // Set a large error to trigger the search logic in controlMotors()
             error = (error_dir < 0) ? OUT_OF_LINE_ERROR_VALUE : -OUT_OF_LINE_ERROR_VALUE;
-        } else {
-            // We found the line again, it was just a gap!
-            // Continue with normal PID calculation.
         }
     }
 
-    // --- NORMAL LINE FOLLOWING ---
-    // Update error_dir based on the outermost sensors for search direction
-    int s1 = (sensorData & (1 << 7)); // Leftmost sensor
-    int s8 = (sensorData & (1 << 0)); // Rightmost sensor
-    if (s1 && !s8) error_dir = -1; // Line is to the left
-    if (!s1 && s8) error_dir = 1;  // Line is to the right
+    int s1 = (sensorData & (1 << 7));
+    int s8 = (sensorData & (1 << 0));
+    if (s1 && !s8) error_dir = -1;
+    if (!s1 && s8) error_dir = 1;
 
-    // Calculate the error for PID control
     error = getCalculatedError(previousError); 
 }
 
@@ -392,43 +386,40 @@ void parseBluetoothCommand() {
   #endif
 }
 
+// In main.cpp
+
 void setup() {
   Serial.begin(SERIAL_BAUD);
   pinMode(S0, INPUT);
   pinMode(S1, INPUT);
-  pinMode(S2, INPUT);
-  pinMode(S3, INPUT);
-  pinMode(S4, INPUT);
-  pinMode(S5, INPUT);
-  pinMode(S6, INPUT);
-  pinMode(S7, INPUT);
+  // ... (all other pinModes)
   pinMode(LED, OUTPUT);
-  
-  // Set up the new calibration button with an internal pull-up resistor
   pinMode(CALIBRATION_BUTTON_PIN, INPUT_PULLUP);
 
   motorInit();
   pinMode(STBY, OUTPUT);
   digitalWrite(STBY, HIGH);
 
-  // Check if the manual calibration button is being held down on startup
-  // A LOW signal means the button is pressed because we are using INPUT_PULLUP
   if (digitalRead(CALIBRATION_BUTTON_PIN) == LOW) {
     Serial.println("Manual calibration triggered!");
-    indicateOn(); // Turn on LED to show calibration is starting
+    indicateOn();
     calibrateSensorsAndTrackType();
     indicateOff();
   } else {
-    // If button is not pressed, try to load from EEPROM
     if (!loadCalibration()) {
-      // If loading fails, then run the calibration routine
-      indicateOn();
-      calibrateSensorsAndTrackType();
-      indicateOff();
+      // If loading fails, use hardcoded default values instead of forcing calibration
+      Serial.println("Load failed. Using hardcoded default thresholds.");
+      int default_thresholds[] = DEFAULT_THRESHOLDS;
+      for(int i=0; i<SENSOR_COUNT; ++i) {
+          thresholds[i] = default_thresholds[i];
+      }
+      // Assume a black line on a white track as a safe default
+      TrackType = BLACK_LINE_WHITE_TRACK;
+      calibrated = true; // Mark as calibrated
     }
   }
 
-  // For debugging, print the final values being used
+  // Debugging print to show final values
   Serial.println("--- Robot is ready with these values: ---");
   Serial.print("TrackType: ");
   Serial.println(TrackType == BLACK_LINE_WHITE_TRACK ? "BLACK_LINE_WHITE_TRACK" : "WHITE_LINE_BLACK_TRACK");
