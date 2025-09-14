@@ -22,7 +22,7 @@
 #define STOP_CHECK_DELAY 200
 #define INTERSECTION_STRAIGHT_MS 50 
 #define GAP_STRAIGHT_MS 100  
-#define DEFAULT_THRESHOLDS {500, 500, 500, 500, 500, 500, 500, 500}
+#define DEFAULT_THRESHOLDS {400, 400, 400, 400, 400, 400, 400, 400}
 // debug
 #define DEBUG_ENABLED 1             // set to 1 to enable sparse debug prints
 #define SERIAL_BAUD 115200

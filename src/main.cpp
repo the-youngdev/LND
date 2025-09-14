@@ -60,7 +60,9 @@ bool calibrated = false;
 
 // helper: map analog readings to digital 0/1 using thresholds
 inline uint8_t analogToDigital(int reading, int threshold) {
-  return (reading > threshold) ? 1 : 0;
+  // This logic is now inverted to match your RLS-08 sensor.
+  // A reading LOWER than the threshold (like a white line) is now considered a '1'.
+  return (reading < threshold) ? 1 : 0;
 }
 
 uint16_t rawAnalog[SENSOR_COUNT];
@@ -82,6 +84,17 @@ uint8_t getSensorReadingsRaw() {
     sensorData |= (bit << (7 - i)); // MSB = leftmost
   }
   return sensorData;
+}
+void saveCalibration() {
+  Serial.println("Saving calibration data to EEPROM...");
+  // Write a 'magic value' to the first byte of EEPROM to know that data is valid
+  EEPROM.write(0, EEPROM_MAGIC_VALUE);
+  
+  // Use EEPROM.put() to store the TrackType and the thresholds array
+  EEPROM.put(1, TrackType);
+  EEPROM.put(1 + sizeof(TrackType), thresholds);
+  
+  Serial.println("Save complete.");
 }
 
 // In calibrateSensorsAndTrackType()
@@ -143,21 +156,12 @@ void calibrateSensorsAndTrackType(unsigned long timeoutMs = 3000) {
   for (int i = 0; i < SENSOR_COUNT; ++i) {
     Serial.print(thresholds[i]); Serial.print(i == SENSOR_COUNT-1 ? "\n" : ", ");
   }
+  saveCalibration(); // This saves the new data to permanent memory
 }
 // Convert sensor bitmap to normalized error (integer). fallbackError used if none detected.
 // In getCalculatedError()
 // In getCalculatedError()
-void saveCalibration() {
-  Serial.println("Saving calibration data to EEPROM...");
-  // Write a 'magic value' to the first byte of EEPROM to know that data is valid
-  EEPROM.write(0, EEPROM_MAGIC_VALUE);
-  
-  // Use EEPROM.put() to store the TrackType and the thresholds array
-  EEPROM.put(1, TrackType);
-  EEPROM.put(1 + sizeof(TrackType), thresholds);
-  
-  Serial.println("Save complete.");
-}
+
 
 bool loadCalibration() {
   Serial.println("Attempting to load calibration from EEPROM...");
@@ -221,11 +225,20 @@ void indicateOff() { digitalWrite(LED, LOW); }
 
 
 
+// In main.cpp
+
 void readSensors()
 {
     uint8_t sensorData = getSensorReadingsRaw();
 
     #if DEBUG_ENABLED
+    Serial.print("Raw Analog: [");
+    for(int i=0; i<SENSOR_COUNT; ++i) {
+        Serial.print(rawAnalog[i]);
+        if (i < SENSOR_COUNT - 1) Serial.print(", ");
+    }
+    Serial.println("]");
+    
     Serial.print("Sensors (BIN): ");
     Serial.println(sensorData, BIN);
     #endif
@@ -234,41 +247,36 @@ void readSensors()
         sensorData = ~sensorData;
     }
     
-    // --- UPDATED LOGIC: SMART INTERSECTION & STOP BOX HANDLING ---
     if (ALL_SENSORS_DETECT_LINE_COLOR(sensorData)) {
         #if DEBUG_ENABLED
-        Serial.println("DEBUG: All sensors active. Checking for Stop Box...");
+        Serial.println("DEBUG: All sensors active. Analyzing surface for Stop Box...");
         #endif
 
-        // Action: Move forward for STOP_CHECK_DELAY to see what's ahead
-        moveStraight(baseMotorSpeed, baseMotorSpeed);
-        delay(STOP_CHECK_DELAY); // Use the delay meant for this purpose
+        bool allSensorsDark = true;
+        bool allSensorsBright = true;
 
-        // Read the sensors again after moving forward
-        uint8_t sensorDataAgain = getSensorReadingsRaw();
-        if (TrackType == WHITE_LINE_BLACK_TRACK) {
-            sensorDataAgain = ~sensorDataAgain;
+        // Analyze the raw analog readings with more realistic thresholds
+        for (int i = 0; i < SENSOR_COUNT; i++) {
+            if (rawAnalog[i] < 800) allSensorsDark = false; 
+            if (rawAnalog[i] > 600) allSensorsBright = false; // Relaxed threshold for bright surfaces
         }
 
-        // Check if we are now off the line
-        if (ALL_SENSORS_OUT_OF_LINE_COLOR(sensorDataAgain)) {
-            // If so, it was a stop box. Brake, stop, and enter standby.
+        if (allSensorsDark || allSensorsBright) {
             #if DEBUG_ENABLED
-            Serial.println("DEBUG: Stop Box Confirmed. Halting.");
+            Serial.println("DEBUG: Solid surface detected. Stop Box Confirmed. Halting.");
             #endif
             shortBrake(BRAKE_DURATION_MILLIS);
             stop();
-            digitalWrite(STBY, LOW); // Go into standby
-            while(true); // Halt the program indefinitely
+            digitalWrite(STBY, LOW); 
+            while(true);
         } else {
-            // If we still see a line, it's an intersection. Proceed to cross it.
             #if DEBUG_ENABLED
-            Serial.println("DEBUG: Intersection Confirmed. Crossing...");
+            Serial.println("DEBUG: Mixed surface readings. Intersection Confirmed. Continuing...");
             #endif
-            // The rest of the intersection logic can go here (color swap, etc.)
-            // For now, we just continue past it
+            moveStraight(baseMotorSpeed, baseMotorSpeed);
+            delay(INTERSECTION_STRAIGHT_MS);
             previousError = 0;
-            return; // Skip PID for this cycle
+            return;
         }
     }
     else if (ALL_SENSORS_OUT_OF_LINE_COLOR(sensorData)) {
@@ -286,8 +294,6 @@ void readSensors()
             error = (error_dir < 0) ? OUT_OF_LINE_ERROR_VALUE : -OUT_OF_LINE_ERROR_VALUE;
         }
     }
-
-    // --- NORMAL LINE FOLLOWING ---
     int s1 = (sensorData & (1 << 7));
     int s8 = (sensorData & (1 << 0));
     if (s1 && !s8) error_dir = -1;
