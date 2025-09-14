@@ -220,45 +220,61 @@ void indicateOn() { digitalWrite(LED, HIGH); }
 void indicateOff() { digitalWrite(LED, LOW); }
 
 
-// In main.cpp
 
 void readSensors()
 {
     uint8_t sensorData = getSensorReadingsRaw();
+
+    #if DEBUG_ENABLED
+    Serial.print("Sensors (BIN): ");
+    Serial.println(sensorData, BIN);
+    #endif
     
     if (TrackType == WHITE_LINE_BLACK_TRACK) {
         sensorData = ~sensorData;
     }
     
+    // --- UPDATED LOGIC: SMART INTERSECTION & STOP BOX HANDLING ---
     if (ALL_SENSORS_DETECT_LINE_COLOR(sensorData)) {
         #if DEBUG_ENABLED
-        // --- TEMPORARY DEBUG MESSAGE ---
-        Serial.println("DEBUG: In Intersection Logic");
+        Serial.println("DEBUG: All sensors active. Checking for Stop Box...");
         #endif
-        // When we hit an intersection, we can determine the current track color
-        int averageRawReading = 0;
-        for(int i=0; i<SENSOR_COUNT; ++i) averageRawReading += rawAnalog[i];
-        averageRawReading /= SENSOR_COUNT;
 
-        if (averageRawReading < 400 && TrackType != WHITE_LINE_BLACK_TRACK) {
-            TrackType = WHITE_LINE_BLACK_TRACK;
-            Serial.println("RUNTIME SWAP to WHITE_LINE_BLACK_TRACK");
-        } 
-        else if (averageRawReading > 600 && TrackType != BLACK_LINE_WHITE_TRACK) {
-            TrackType = BLACK_LINE_WHITE_TRACK;
-            Serial.println("RUNTIME SWAP to BLACK_LINE_WHITE_TRACK");
+        // Action: Move forward for STOP_CHECK_DELAY to see what's ahead
+        moveStraight(baseMotorSpeed, baseMotorSpeed);
+        delay(STOP_CHECK_DELAY); // Use the delay meant for this purpose
+
+        // Read the sensors again after moving forward
+        uint8_t sensorDataAgain = getSensorReadingsRaw();
+        if (TrackType == WHITE_LINE_BLACK_TRACK) {
+            sensorDataAgain = ~sensorDataAgain;
         }
 
-        moveStraight(baseMotorSpeed, baseMotorSpeed);
-        delay(INTERSECTION_STRAIGHT_MS);
-        previousError = 0;
-        return;
+        // Check if we are now off the line
+        if (ALL_SENSORS_OUT_OF_LINE_COLOR(sensorDataAgain)) {
+            // If so, it was a stop box. Brake, stop, and enter standby.
+            #if DEBUG_ENABLED
+            Serial.println("DEBUG: Stop Box Confirmed. Halting.");
+            #endif
+            shortBrake(BRAKE_DURATION_MILLIS);
+            stop();
+            digitalWrite(STBY, LOW); // Go into standby
+            while(true); // Halt the program indefinitely
+        } else {
+            // If we still see a line, it's an intersection. Proceed to cross it.
+            #if DEBUG_ENABLED
+            Serial.println("DEBUG: Intersection Confirmed. Crossing...");
+            #endif
+            // The rest of the intersection logic can go here (color swap, etc.)
+            // For now, we just continue past it
+            previousError = 0;
+            return; // Skip PID for this cycle
+        }
     }
     else if (ALL_SENSORS_OUT_OF_LINE_COLOR(sensorData)) {
-        #if DEBUG_ENABLED 
-        // --- TEMPORARY DEBUG MESSAGE ---
+        #if DEBUG_ENABLED
         Serial.println("DEBUG: In Gap/Off-line Logic");
-        #endif 
+        #endif
 
         moveStraight(baseMotorSpeed, baseMotorSpeed);
         delay(GAP_STRAIGHT_MS);
@@ -271,6 +287,7 @@ void readSensors()
         }
     }
 
+    // --- NORMAL LINE FOLLOWING ---
     int s1 = (sensorData & (1 << 7));
     int s8 = (sensorData & (1 << 0));
     if (s1 && !s8) error_dir = -1;
