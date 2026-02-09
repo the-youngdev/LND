@@ -37,7 +37,7 @@ Different drivers work differently.
 | **Motors** | Left Inputs | 8, 7 | 8, 7 |
 | | Left PWM (ENA for L298N // PWMA for TB6612FNG) | 9 | 9 |
 | | Right Inputs | 4, 5 | 4, 5 |
-| | Right PWM ENB for L298N // PWMB for TB6612FNG) | 11 | 11 |
+| | Right PWM (ENB for L298N // PWMB for TB6612FNG) | 11 | 11 |
 | **Driver** | Standby (STBY)(Only if using TB6612FNG) | 6 (Only if using TB6612FNG)| 6 (Only if using TB6612FNG) |
 | **Indicator** | LED | 3 | 3 |
 
