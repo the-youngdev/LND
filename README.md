@@ -38,7 +38,7 @@ Different drivers work differently.
 | | Left PWM | 9 | 9 |
 | | Right Inputs | 4, 5 | 4, 5 |
 | | Right PWM | 11 | 11 |
-| **Driver** | Standby (STBY) | 6 | 6 (Only if using TB6612FNG) |
+| **Driver** | Standby (STBY)(Only if using TB6612FNG) | 6 (Only if using TB6612FNG)| 6 (Only if using TB6612FNG) |
 | **Indicator** | LED | 3 | 3 |
 
 ## 🔧 Tuning (src/Config.h)
