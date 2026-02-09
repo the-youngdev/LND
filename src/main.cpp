@@ -1,460 +1,284 @@
 #include <Arduino.h>
 #include <stdint.h>
-#include <EEPROM.h>
 #include "motor_control.h"
 #include "Config.h"
 
-#define CALIBRATION_BUTTON_PIN 2 
-#define EEPROM_MAGIC_VALUE   'C' 
+// --- Logic Definitions ---
 #define WHITE_LINE_BLACK_TRACK 1
 #define BLACK_LINE_WHITE_TRACK 0
 #define SENSOR_COUNT 8
 #define POSITIONAL_WEIGHT_W 100 
+#define LED 3 // Indicator LED pin
 
-
-#define CMD_STANDBY    's'
-#define CMD_RUN        'r'
-
+// --- Macros for Sensor Logic ---
 #define ALL_SENSORS_DETECT_LINE_COLOR(R) (R == 0b11111111)
 #define ALL_SENSORS_OUT_OF_LINE_COLOR(R) (R == 0b00000000)
-#define IS_ACUTE_LEFT(R)  ((R == 0b11100000) || (R == 0b11000000))
-#define IS_ACUTE_RIGHT(R) ((R == 0b00000111) || (R == 0b00000011))
-
 #define MID_6_SENSORS_DETECT_LINE_COLOR(R) ((R & 0b01111110) == 0b01111110)
 
-#define LED 3
-
-String dataBL = "";
-
+// --- Global Variables ---
 int Kp = DEFAULT_KP;
 int Ki = DEFAULT_KI;
 int Kd = DEFAULT_KD;
 
-int P = 0;
-int I = 0;
-int D = 0;
+int P = 0, I = 0, D = 0;
 int previousError = 0;
 int PID_value = 0;
 
 int TrackType = BLACK_LINE_WHITE_TRACK;
 
-int S0 = A0;
-int S1 = A1;
-int S2 = A2;
-int S3 = A3;
-int S4 = A4;
-int S5 = A5;
-int S6 = A6;
-int S7 = A7;
+// ================================================================
+//               SENSOR PIN CONFIGURATION (READ CAREFULLY)
+// ================================================================
 
-int loopDelay = DEFAULT_LOOP_DELAY;
-int leftMotorOffset = 50;
-int rightMotorOffset = 50;
+/* --- FOR ARDUINO NANO USERS (DEFAULT) ---
+   The Nano has 8 Analog pins (A0-A7). We use all of them.
+   - S0 -> A7 (Analog Input Only)
+   - S1 -> A6 (Analog Input Only)
+   - S2-S7 -> A5-A0 (Digital Capable)
+*/
+int S0 = A7; 
+int S1 = A6; 
+
+/* --- FOR ARDUINO UNO USERS ---
+   The Uno ONLY has A0-A5. Pins A6 and A7 DO NOT EXIST.
+   You must move S0 and S1 to available Digital Pins.
+   
+   RECOMMENDED UNO WIRING:
+   - Connect Sensor S0 to Digital Pin 2
+   - Connect Sensor S1 to Digital Pin 10
+   
+   INSTRUCTIONS:
+   1. Comment out the "Nano" lines above (int S0=A7...).
+   2. Uncomment the "Uno" lines below:
+*/
+
+// int S0 = 2;   // <--- UNCOMMENT FOR UNO (Pin D2)
+// int S1 = 10;  // <--- UNCOMMENT FOR UNO (Pin D10)
+
+// ----------------------------------------------------------------
+
+// Remaining sensors (Compatible with both Uno and Nano)
+int S2 = A5;
+int S3 = A4;
+int S4 = A3;
+int S5 = A2;
+int S6 = A1;
+int S7 = A0;
+
 int error = 0;
 int error_dir = 0;
 int baseMotorSpeed = DEFAULT_MOTOR_SPEED;
 
-// calibration thresholds (0..1023)
-int thresholds[SENSOR_COUNT] = {400,400,400,400,400,400,400,400};
-bool calibrated = false;
+// --- Function to read 8 sensors and pack into a byte ---
+uint8_t getSensorReadings()
+{
+  uint8_t sensorData = 0x00;
+  int Sen1, Sen2;
 
-// helper: map analog readings to digital 0/1 using thresholds
-inline uint8_t analogToDigital(int reading, int threshold) {
-  // This logic is now inverted to match your RLS-08 sensor.
-  // A reading LOWER than the threshold (like a white line) is now considered a '1'.
-  return (reading < threshold) ? 1 : 0;
-}
+  // ==============================================================
+  //           SENSOR READING LOGIC (MODIFY FOR UNO)
+  // ==============================================================
+  
+  // --- OPTION A: ARDUINO NANO (DEFAULT) ---
+  // A6 and A7 are Analog-only pins. We must use analogRead().
+  // Threshold > 250 converts the analog value to 0 or 1.
+  Sen1 = (analogRead(S0) > 250) ? 1 : 0;
+  Sen2 = (analogRead(S1) > 250) ? 1 : 0;
 
-uint16_t rawAnalog[SENSOR_COUNT];
+  // --- OPTION B: ARDUINO UNO ---
+  // IF you switched S0/S1 to Digital Pins above, uncomment these:
+  
+  // Sen1 = digitalRead(S0); // <--- UNCOMMENT FOR UNO
+  // Sen2 = digitalRead(S1); // <--- UNCOMMENT FOR UNO
+  
+  // Note: For digitalRead(), the sensitivity is set by the 
+  // potentiometer on the sensor module itself, not the code.
+  // ==============================================================
 
-uint8_t getSensorReadingsRaw() {
-  // read all 8 as analog for consistency and precision
-  rawAnalog[0] = analogRead(S0);
-  rawAnalog[1] = analogRead(S1);
-  rawAnalog[2] = analogRead(S2);
-  rawAnalog[3] = analogRead(S3);
-  rawAnalog[4] = analogRead(S4);
-  rawAnalog[5] = analogRead(S5);
-  rawAnalog[6] = analogRead(S6);
-  rawAnalog[7] = analogRead(S7);
+  // Read remaining sensors (A0-A5 treated as Digital)
+  // Software thresholds are IGNORED here; adjust the sensor pot!
+  int Sen3 = digitalRead(S2);
+  int Sen4 = digitalRead(S3);
+  int Sen5 = digitalRead(S4);
+  int Sen6 = digitalRead(S5);
+  int Sen7 = digitalRead(S6);
+  int Sen8 = digitalRead(S7);
 
-  uint8_t sensorData = 0;
-  for (int i = 0; i < SENSOR_COUNT; ++i) {
-    uint8_t bit = analogToDigital(rawAnalog[i], thresholds[i]);
-    sensorData |= (bit << (7 - i)); // MSB = leftmost
+  // Pack bits into a single byte
+  sensorData |= ((uint8_t)Sen1 << 7) | ((uint8_t)Sen2 << 6) | ((uint8_t)Sen3 << 5) | 
+                ((uint8_t)Sen4 << 4) | ((uint8_t)Sen5 << 3) | ((uint8_t)Sen6 << 2) | 
+                ((uint8_t)Sen7 << 1) | (uint8_t)Sen8;
+
+  // Auto-detect track color
+  // Logic simplified: If middle sensors see line, it's White on Black, etc.
+  if (sensorData == 0b01100000 || sensorData == 0b01110000 || sensorData == 0b00110000 ||
+      sensorData == 0b00111000 || sensorData == 0b00010000 || sensorData == 0b00011000 ||
+      sensorData == 0b00011100 || sensorData == 0b00001000 || sensorData == 0b00001100 ||
+      sensorData == 0b00001110 || sensorData == 0b00000100 || sensorData == 0b00000110)
+  {
+      TrackType = WHITE_LINE_BLACK_TRACK;
   }
+  else if (sensorData == 0b10011111 || sensorData == 0b10001111 || sensorData == 0b11011111 ||
+           sensorData == 0b11001111 || sensorData == 0b11000111 || sensorData == 0b11101111 ||
+           sensorData == 0b11100111 || sensorData == 0b11100011 || sensorData == 0b11110111 ||
+           sensorData == 0b11110011 || sensorData == 0b11110001 || sensorData == 0b11111011 ||
+           sensorData == 0b11111001)
+  {
+      TrackType = BLACK_LINE_WHITE_TRACK;
+  }
+
+  // Invert logic if we are on a black line
+  if (TrackType == BLACK_LINE_WHITE_TRACK)
+      sensorData ^= 0b11111111;
+
   return sensorData;
 }
-void saveCalibration() {
-  Serial.println("Saving calibration data to EEPROM...");
-  // Write a 'magic value' to the first byte of EEPROM to know that data is valid
-  EEPROM.write(0, EEPROM_MAGIC_VALUE);
-  
-  // Use EEPROM.put() to store the TrackType and the thresholds array
-  EEPROM.put(1, TrackType);
-  EEPROM.put(1 + sizeof(TrackType), thresholds);
-  
-  Serial.println("Save complete.");
-}
 
-// In calibrateSensorsAndTrackType()
-void calibrateSensorsAndTrackType(unsigned long timeoutMs = 3000) {
-  // Simple calibration routine:
-  // 1) User places robot over line center -> press power
-  // 2) We sample for 'timeoutMs' and compute thresholds between line and background
-  unsigned long start = millis();
-  uint32_t sumOn[SENSOR_COUNT] = {0};
-  uint32_t cntOn = 0;
-
-  Serial.println("Calibration: place robot with sensors on LINE (center) for 2s...");
-  delay(2000);
-  while (millis() - start < timeoutMs) {
-    for (int i = 0; i < SENSOR_COUNT; ++i) sumOn[i] += analogRead(A0 + i);
-    cntOn++;
-    delay(10);
-  }
-
-  // then read background
-  Serial.println("Calibration: place robot off line (background) for 2s...");
-  delay(2000);
-  start = millis();
-  uint32_t sumOff[SENSOR_COUNT] = {0};
-  uint32_t cntOff = 0;
-  while (millis() - start < timeoutMs) {
-    for (int i = 0; i < SENSOR_COUNT; ++i) sumOff[i] += analogRead(A0 + i);
-    cntOff++;
-    delay(10);
-  }
-
-  // compute thresholds halfway between average on-line and off-line
-  for (int i = 0; i < SENSOR_COUNT; ++i) {
-    int avgOn = (int)(sumOn[i] / max(1U, cntOn));
-    int avgOff = (int)(sumOff[i] / max(1U, cntOff));
-    thresholds[i] = (avgOn + avgOff) / 2;
-    // ensure threshold is within reasonable bounds
-    thresholds[i] = constrain(thresholds[i], 80, 900);
-  }
-
-  // Determine track color by comparing averages
-  int brightnessOn = 0, brightnessOff = 0;
-  for (int i = 0; i < SENSOR_COUNT; ++i) {
-    brightnessOn += (int)(sumOn[i] / max(1U, cntOn));
-    brightnessOff += (int)(sumOff[i] / max(1U, cntOff));
-  }
-
-  // *** FIX: Logic swapped to correctly identify track type ***
-  if (brightnessOn < brightnessOff) {
-    TrackType = WHITE_LINE_BLACK_TRACK; // Line is brighter (lower analog value)
-    Serial.println("TrackType: WHITE_LINE_BLACK_TRACK");
-  } else {
-    TrackType = BLACK_LINE_WHITE_TRACK; // Line is darker (higher analog value)
-    Serial.println("TrackType: BLACK_LINE_WHITE_TRACK");
-  }
-
-  calibrated = true;
-  Serial.println("Calibration complete. Thresholds:");
-  for (int i = 0; i < SENSOR_COUNT; ++i) {
-    Serial.print(thresholds[i]); Serial.print(i == SENSOR_COUNT-1 ? "\n" : ", ");
-  }
-  saveCalibration(); // This saves the new data to permanent memory
-}
-// Convert sensor bitmap to normalized error (integer). fallbackError used if none detected.
-// In getCalculatedError()
-// In getCalculatedError()
-
-
-bool loadCalibration() {
-  Serial.println("Attempting to load calibration from EEPROM...");
-  // Check if our 'magic value' exists. If not, the EEPROM is empty or has old data.
-  if (EEPROM.read(0) == EEPROM_MAGIC_VALUE) {
-    // If it exists, load the data using EEPROM.get()
-    EEPROM.get(1, TrackType);
-    EEPROM.get(1 + sizeof(TrackType), thresholds);
-    
-    Serial.println("Load successful. Using stored values.");
-    calibrated = true; // Make sure the global flag is set
-    return true; // Return true to indicate success
-  }
-  
-  Serial.println("No valid calibration data found.");
-  return false; // Return false to indicate failure
-}
-
-// In main.cpp
-
+// --- Calculate Weighted Error ---
 int getCalculatedError(int fallbackError)
 {
-
-    uint8_t sensorReading = getSensorReadingsRaw();
-    if (TrackType == WHITE_LINE_BLACK_TRACK) {
-      sensorReading = ~sensorReading;
-    }
-
-    int numeratorSum = 0;
-    int denominatorSum = 0;
+    uint8_t sensorReading = getSensorReadings();
+    int numeratorSum = 0, denominatorSum = 0;
 
     for (int i = 0; i < SENSOR_COUNT; i++)
     {
-        uint8_t sensorValue = ((sensorReading >> (SENSOR_COUNT - 1 - i)) & 0x01);
-        int weight = (i * 2); 
-        numeratorSum += weight * sensorValue;
+        uint8_t sensorValue = ((sensorReading & (1 << (SENSOR_COUNT - 1 - i))) >> (SENSOR_COUNT - 1 - i));
+        numeratorSum += (i + 1) * POSITIONAL_WEIGHT_W * (int)sensorValue;
         denominatorSum += sensorValue;
     }
 
-    if (denominatorSum == 0) {
-      return fallbackError;
-    }
-    
-    long position_fixed = (long)numeratorSum * 100 / denominatorSum; 
-    long center_fixed = ( (SENSOR_COUNT - 1) * 2 * 100 ) / 2;       
-    long e_fixed = position_fixed - center_fixed;                   
-
-    int scaledError = (int)((e_fixed * POSITIONAL_WEIGHT_W) / 700); 
-    return scaledError;
+    int error = fallbackError;
+    if (denominatorSum != 0)
+        error = ((numeratorSum / (denominatorSum * (POSITIONAL_WEIGHT_W/2))) - (SENSOR_COUNT + 1));
+    return error;
 }
 
+// --- Check if completely lost ---
 int isOutOfLine(uint8_t sensorReadings)
 {
-    // When all sensors 0 => out of line
-    if (sensorReadings == 0) return 1;
-    return 0;
+    // Patterns that indicate we are at least partially on the line
+    uint8_t options[] = {
+        0b01100000, 0b01110000, 0b00110000, 0b00111000, 0b00011000, 0b00011100,
+        0b00001100, 0b00001110, 0b00000110, 0b10011111, 0b10001111, 0b11001111,
+        0b11000111, 0b11100111, 0b11100011, 0b11110011, 0b11110001, 0b11111001
+    };
+    int n = sizeof(options) / sizeof(uint8_t);
+    for (int i = 0; i < n; i++) {
+        if (sensorReadings == options[i]) return 0; // Found the line
+    }
+    return 1; // Lost the line
 }
-
-void indicateOn() { digitalWrite(LED, HIGH); }
-void indicateOff() { digitalWrite(LED, LOW); }
-
-
-
-// In main.cpp
 
 void readSensors()
 {
-    uint8_t sensorData = getSensorReadingsRaw();
+    uint8_t sensorData = getSensorReadings();
+    error = getCalculatedError(1);
 
-    #if DEBUG_ENABLED
-    Serial.print("Raw Analog: [");
-    for(int i=0; i<SENSOR_COUNT; ++i) {
-        Serial.print(rawAnalog[i]);
-        if (i < SENSOR_COUNT - 1) Serial.print(", ");
+    int s1 = (sensorData & (1 << 7)) >> 7;
+    int s8 = (sensorData & (1 << 0)) >> 0;
+
+    if (s1 != s8) error_dir = s1 - s8;
+
+    // Logic for when line is lost (Gap Handling)
+    if (ALL_SENSORS_OUT_OF_LINE_COLOR(sensorData))
+    {
+        if (error_dir < 0) error = OUT_OF_LINE_ERROR_VALUE;
+        else if (error_dir > 0) error = -1 * OUT_OF_LINE_ERROR_VALUE;
     }
-    Serial.println("]");
-    
-    Serial.print("Sensors (BIN): ");
-    Serial.println(sensorData, BIN);
-    #endif
-    
-    if (TrackType == WHITE_LINE_BLACK_TRACK) {
-        sensorData = ~sensorData;
-    }
-    
-    if (ALL_SENSORS_DETECT_LINE_COLOR(sensorData)) {
-        #if DEBUG_ENABLED
-        Serial.println("DEBUG: All sensors active. Analyzing surface for Stop Box...");
-        #endif
-
-        bool allSensorsDark = true;
-        bool allSensorsBright = true;
-
-        // Analyze the raw analog readings with more realistic thresholds
-        for (int i = 0; i < SENSOR_COUNT; i++) {
-            if (rawAnalog[i] < 800) allSensorsDark = false; 
-            if (rawAnalog[i] > 600) allSensorsBright = false; // Relaxed threshold for bright surfaces
-        }
-
-        if (allSensorsDark || allSensorsBright) {
-            #if DEBUG_ENABLED
-            Serial.println("DEBUG: Solid surface detected. Stop Box Confirmed. Halting.");
-            #endif
-            shortBrake(BRAKE_DURATION_MILLIS);
-            stop();
-            digitalWrite(STBY, LOW); 
-            while(true);
-        } else {
-            #if DEBUG_ENABLED
-            Serial.println("DEBUG: Mixed surface readings. Intersection Confirmed. Continuing...");
-            #endif
-            moveStraight(baseMotorSpeed, baseMotorSpeed);
-            delay(INTERSECTION_STRAIGHT_MS);
-            previousError = 0;
-            return;
-        }
-    }
-    else if (ALL_SENSORS_OUT_OF_LINE_COLOR(sensorData)) {
-        #if DEBUG_ENABLED
-        Serial.println("DEBUG: In Gap/Off-line Logic");
-        #endif
-
+    // Logic for Intersection (All sensors see line)
+    else if (ALL_SENSORS_DETECT_LINE_COLOR(sensorData))
+    {
         moveStraight(baseMotorSpeed, baseMotorSpeed);
-        delay(GAP_STRAIGHT_MS);
-        
-        uint8_t sensorDataAgain = getSensorReadingsRaw();
-        if (TrackType == WHITE_LINE_BLACK_TRACK) sensorDataAgain = ~sensorDataAgain;
-
-        if (ALL_SENSORS_OUT_OF_LINE_COLOR(sensorDataAgain)) {
-            error = (error_dir < 0) ? OUT_OF_LINE_ERROR_VALUE : -OUT_OF_LINE_ERROR_VALUE;
+        delay(STOP_CHECK_DELAY);
+        uint8_t sensorDataAgain = getSensorReadings();
+        if (ALL_SENSORS_DETECT_LINE_COLOR(sensorDataAgain))
+        {
+            shortBrake(100);
+            stop();
+            delay(10000); // Stop at finish line
         }
     }
-    int s1 = (sensorData & (1 << 7));
-    int s8 = (sensorData & (1 << 0));
-    if (s1 && !s8) error_dir = -1;
-    if (!s1 && s8) error_dir = 1;
 
-    error = getCalculatedError(previousError); 
+    if (MID_6_SENSORS_DETECT_LINE_COLOR(sensorData)) digitalWrite(LED, HIGH);
+    else digitalWrite(LED, LOW);
 }
 
-// In calculatePID()
 void calculatePID()
 {
-    // Proportional
     P = error;
-
-    // Integral with anti-windup
     I = (error == 0) ? 0 : I + error;
-    I = constrain(I, -500, 500);
-
-    // *** OPTIMIZATION: Using fixed-point integer math for derivative smoothing ***
-    long rawD = error - previousError;
-    static long smoothD_fixed = 0;
-    const int alpha_fixed = 25; // Represents 0.25 (smoothing factor)
+    I = constrain(I, -200, 200);
+    D = error - previousError;
     
-    // Perform the smoothing calculation with integers
-    smoothD_fixed = (alpha_fixed * rawD + (100 - alpha_fixed) * smoothD_fixed) / 100;
-    D = (int)smoothD_fixed;
+    // Stabilize derivative
+    if ((error - previousError) != 0) delay(5);
     
-    // Combine
-    long pid = (long)Kp * P + (long)Ki * I + (long)Kd * D;
-    PID_value = (int)constrain(pid / 1, -200, 200);
-
+    PID_value = (Kp * P) + (Ki * I) + (Kd * D);
+    PID_value = constrain(PID_value, -200, 200);
     previousError = error;
 }
 
-// New helper function to search for the line
-void searchForLine() {
-#if BRAKING_ENABLED == 1
-    shortBrake(BRAKE_DURATION_MILLIS);
-#endif
-    uint8_t sensorReadings = getSensorReadingsRaw();
-    while (isOutOfLine(sensorReadings)) {
-        if (error_dir < 0) { // Last seen to the right, so turn left (CCW)
-            turnCCW(baseMotorSpeed - leftMotorOffset, baseMotorSpeed - rightMotorOffset);
-        } else { // Last seen to the left or unknown, so turn right (CW)
-            turnCW(baseMotorSpeed - leftMotorOffset, baseMotorSpeed - rightMotorOffset);
-        }
-        sensorReadings = getSensorReadingsRaw();
-    }
-#if GAPS_ENABLED == 1
-    error_dir = 0;
-#endif
-}
-
-
-
-
 void controlMotors()
 {
-  #if DEBUG_ENABLED
-  Serial.print("Error: "); Serial.println(error);
-  #endif
-
-  // If error is max value, it means we are lost (not in a gap) -> Search for line
-  if (abs(error) == OUT_OF_LINE_ERROR_VALUE)
-  {
-    searchForLine(); // This function already exists and works well for this
-  }
-  else // Otherwise, use PID to steer
-  {
-    int leftMotorSpeed = baseMotorSpeed + PID_value;
-    int rightMotorSpeed = baseMotorSpeed - PID_value;
-
-    moveStraight(leftMotorSpeed, rightMotorSpeed);
-  }
-}
-
-void parseBluetoothCommand() {
-  #if BLUETOOTH_TUNING_ENABLED
-  static char buffer[32];
-  static size_t idx = 0;
-  while (Serial.available() > 0) {
-    char c = Serial.read();
-    if (c == '\n' || c == '\r') {
-      buffer[idx] = '\0';
-      if (idx > 0) {
-        char cmd = tolower(buffer[0]);
-        if (cmd == 's') {
-          shortBrake(200);
-          stop();
-          digitalWrite(STBY, LOW);
-          Serial.println("STANDBY");
-        } else if (cmd == 'r') {
-          digitalWrite(STBY, HIGH);
-          Serial.println("RUNNING");
-        } else if (cmd == 'p' || cmd == 'i' || cmd == 'd' || cmd == 'm') {
-          int value = atoi(buffer + 1);
-          if (value != 0 || buffer[1] == '0') {
-            switch (cmd) {
-              case 'p': Kp = value; break;
-              case 'i': Ki = value; break;
-              case 'd': Kd = value; break;
-              case 'm': baseMotorSpeed = constrain(value, 0, 255); break;
-            }
-            Serial.print(cmd); Serial.print(":"); Serial.println(value);
-          }
+    // Handle "Out of Line" cases (Rotate to find line)
+    if (error == OUT_OF_LINE_ERROR_VALUE)
+    {
+        #if BRAKING_ENABLED == 1
+            shortBrake(BRAKE_DURATION_MILLIS);
+        #endif
+        uint8_t sensorReadings = getSensorReadings();
+        while (isOutOfLine(sensorReadings))
+        {
+            turnCCW(baseMotorSpeed - LEFT_MOTOR_OFFSET, baseMotorSpeed - RIGHT_MOTOR_OFFSET);
+            sensorReadings = getSensorReadings();
         }
-      }
-      idx = 0;
-    } else if (idx < sizeof(buffer)-1) {
-      buffer[idx++] = c;
+        #if GAPS_ENABLED == 1
+            error_dir = 0;
+        #endif
     }
-  }
-  #endif
-}
+    else if (error == (-1 * OUT_OF_LINE_ERROR_VALUE))
+    {
+        #if BRAKING_ENABLED == 1
+            shortBrake(BRAKE_DURATION_MILLIS);
+        #endif
+        uint8_t sensorReadings = getSensorReadings();
+        while (isOutOfLine(sensorReadings))
+        {
+            turnCW(baseMotorSpeed - LEFT_MOTOR_OFFSET, baseMotorSpeed - RIGHT_MOTOR_OFFSET);
+            sensorReadings = getSensorReadings();
+        }
+        #if GAPS_ENABLED == 1
+            error_dir = 0;
+        #endif
+    }
+    // Normal PID Following
+    else
+    {
+        int rightMotorSpeed = baseMotorSpeed + PID_value - LEFT_MOTOR_OFFSET;
+        int leftMotorSpeed = baseMotorSpeed - PID_value - RIGHT_MOTOR_OFFSET;
 
-// In main.cpp
+        moveStraight(leftMotorSpeed, rightMotorSpeed);
+        if (D != 0) delay(DEFAULT_LOOP_DELAY);
+    }
+}
 
 void setup() {
-  Serial.begin(SERIAL_BAUD);
-  pinMode(S0, INPUT);
-  pinMode(S1, INPUT);
-  // ... (all other pinModes)
+  Serial.begin(9600);
+
+  // Initialize Pins (Default mode)
+  pinMode(S0, INPUT); pinMode(S1, INPUT); pinMode(S2, INPUT); pinMode(S3, INPUT);
+  pinMode(S4, INPUT); pinMode(S5, INPUT); pinMode(S6, INPUT); pinMode(S7, INPUT);
+
   pinMode(LED, OUTPUT);
-  pinMode(CALIBRATION_BUTTON_PIN, INPUT_PULLUP);
-
   motorInit();
-  pinMode(STBY, OUTPUT);
-  digitalWrite(STBY, HIGH);
-
-  if (digitalRead(CALIBRATION_BUTTON_PIN) == LOW) {
-    Serial.println("Manual calibration triggered!");
-    indicateOn();
-    calibrateSensorsAndTrackType();
-    indicateOff();
-  } else {
-    if (!loadCalibration()) {
-      // If loading fails, use hardcoded default values instead of forcing calibration
-      Serial.println("Load failed. Using hardcoded default thresholds.");
-      int default_thresholds[] = DEFAULT_THRESHOLDS;
-      for(int i=0; i<SENSOR_COUNT; ++i) {
-          thresholds[i] = default_thresholds[i];
-      }
-      // Assume a black line on a white track as a safe default
-      TrackType = BLACK_LINE_WHITE_TRACK;
-      calibrated = true; // Mark as calibrated
-    }
-  }
-
-  // Debugging print to show final values
-  Serial.println("--- Robot is ready with these values: ---");
-  Serial.print("TrackType: ");
-  Serial.println(TrackType == BLACK_LINE_WHITE_TRACK ? "BLACK_LINE_WHITE_TRACK" : "WHITE_LINE_BLACK_TRACK");
-  Serial.print("Thresholds: ");
-  for (int i = 0; i < SENSOR_COUNT; ++i) {
-    Serial.print(thresholds[i]); Serial.print(i == SENSOR_COUNT-1 ? "\n" : ", ");
-  }
-  Serial.println("-----------------------------------------");
+  
+  // Enable Motor Driver if using TB6612FNG
+  #if USE_STANDBY_PIN == 1
+    digitalWrite(STBY, HIGH); 
+  #endif
 }
 
 void loop() {
-  parseBluetoothCommand();
   readSensors();
   calculatePID();
   controlMotors();
